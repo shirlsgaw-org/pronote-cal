@@ -12,9 +12,9 @@ Globals:
       Variables:
         LOG_LEVEL: INFO
         AWS_REGION: !Ref AWS::Region
-        PRONOTE_URL: "https://4040017y.index-education.net/pronote/""
         CALENDAR_ID: "925286f2f4074bd2c182bbf3583d9e9aacd18eca46682bb39dcae53aebdc3724@group.calendar.google.com"
-
+        GOOGLE_CREDENTIALS_SECRET_NAME: "google-calendar-credentials"
+        PRONOTE_CREDENTIALS_SECRET_NAME: "pronote-credentials"
 # Parameters for deployment
 Parameters:
   PronoteUrl:
