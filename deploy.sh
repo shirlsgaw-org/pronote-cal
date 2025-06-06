@@ -64,40 +64,29 @@ check_prerequisites() {
     echo_info "Prerequisites check passed"
 }
 
-# Validate environment variables
-validate_env_vars() {
-    echo_info "Validating required environment variables..."
+# Validate AWS Secrets Manager secrets exist
+validate_secrets() {
+    echo_info "Validating AWS Secrets Manager secrets..."
     
-    required_vars=(
-        "PRONOTE_URL"
-        "PRONOTE_USERNAME" 
-        "PRONOTE_PASSWORD"
-        "GOOGLE_CALENDAR_ID"
-        "GOOGLE_CREDENTIALS_SECRET_NAME"
-    )
-    
-    missing_vars=()
-    for var in "${required_vars[@]}"; do
-        if [[ -z "${!var}" ]]; then
-            missing_vars+=("$var")
-        fi
-    done
-    
-    if [[ ${#missing_vars[@]} -gt 0 ]]; then
-        echo_error "Missing required environment variables:"
-        for var in "${missing_vars[@]}"; do
-            echo_error "  - $var"
-        done
-        echo_info "Set these variables before deployment:"
-        echo_info "  export PRONOTE_URL='https://your-pronote-instance.com'"
-        echo_info "  export PRONOTE_USERNAME='your_username'"
-        echo_info "  export PRONOTE_PASSWORD='your_password'"
-        echo_info "  export GOOGLE_CALENDAR_ID='your_calendar_id@gmail.com'"
-        echo_info "  export GOOGLE_CREDENTIALS_SECRET_NAME='google-calendar-credentials'"
-        exit 1
+    # Check if Pronote credentials secret exists
+    if ! aws secretsmanager describe-secret \
+        --secret-id "pronote-credentials" \
+        --region "$AWS_REGION" >/dev/null 2>&1; then
+        echo_error "Pronote credentials secret 'pronote-credentials' not found in AWS Secrets Manager"
+        echo_info "Create the secret with format: {\"url\": \"https://...\", \"username\": \"...\", \"password\": \"...\"}"
+        return 1
     fi
     
-    echo_info "Environment variables validation passed"
+    # Check if Google credentials secret exists
+    if ! aws secretsmanager describe-secret \
+        --secret-id "google-calendar-credentials" \
+        --region "$AWS_REGION" >/dev/null 2>&1; then
+        echo_error "Google credentials secret 'google-calendar-credentials' not found in AWS Secrets Manager"
+        echo_info "Create the secret with your Google service account JSON"
+        return 1
+    fi
+    
+    echo_info "Secrets validation passed"
 }
 
 # Set S3 bucket for deployment
@@ -132,18 +121,12 @@ build_sam() {
 deploy_sam() {
     echo_info "Deploying SAM application..."
     
-    # Deploy with parameters
+    # Deploy with parameters (credentials now come from Secrets Manager)
     sam deploy \
         --stack-name "$STACK_NAME" \
         --s3-bucket "$S3_BUCKET" \
         --capabilities CAPABILITY_IAM \
         --region "$AWS_REGION" \
-        --parameter-overrides \
-            PronoteUrl="$PRONOTE_URL" \
-            PronoteUsername="$PRONOTE_USERNAME" \
-            PronotePassword="$PRONOTE_PASSWORD" \
-            GoogleCalendarId="$GOOGLE_CALENDAR_ID" \
-            GoogleCredentialsSecretName="$GOOGLE_CREDENTIALS_SECRET_NAME" \
         --confirm-changeset
     
     echo_info "Deployment completed"
@@ -160,41 +143,71 @@ get_outputs() {
         --output table
 }
 
-# Create Google Calendar credentials secret
-setup_google_credentials() {
-    echo_info "Setting up Google Calendar credentials..."
+# Create or update secrets
+setup_secrets() {
+    echo_info "Setting up AWS Secrets Manager secrets..."
     
-    if [[ ! -f "google-credentials.json" ]]; then
+    # Setup Google Calendar credentials
+    if [[ -f "google-credentials.json" ]]; then
+        echo_info "Setting up Google Calendar credentials..."
+        
+        if aws secretsmanager describe-secret \
+            --secret-id "google-calendar-credentials" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            
+            echo_info "Updating existing Google credentials secret..."
+            aws secretsmanager update-secret \
+                --secret-id "google-calendar-credentials" \
+                --region "$AWS_REGION" \
+                --secret-string file://google-credentials.json
+        else
+            echo_info "Creating new Google credentials secret..."
+            aws secretsmanager create-secret \
+                --name "google-calendar-credentials" \
+                --region "$AWS_REGION" \
+                --description "Google Calendar API credentials for Pronote sync" \
+                --secret-string file://google-credentials.json
+        fi
+        
+        echo_info "Google credentials secret configured"
+    else
         echo_warn "google-credentials.json not found"
-        echo_info "Please follow these steps:"
+        echo_info "Please follow these steps to setup Google Calendar API:"
         echo_info "1. Go to Google Cloud Console"
         echo_info "2. Enable Calendar API"
         echo_info "3. Create a service account"
         echo_info "4. Download the credentials JSON file as 'google-credentials.json'"
         echo_info "5. Run this script again"
-        return 1
     fi
     
-    # Create or update the secret
-    if aws secretsmanager describe-secret \
-        --secret-id "$GOOGLE_CREDENTIALS_SECRET_NAME" \
-        --region "$AWS_REGION" >/dev/null 2>&1; then
+    # Setup Pronote credentials
+    if [[ -f "pronote-credentials.json" ]]; then
+        echo_info "Setting up Pronote credentials..."
         
-        echo_info "Updating existing secret..."
-        aws secretsmanager update-secret \
-            --secret-id "$GOOGLE_CREDENTIALS_SECRET_NAME" \
-            --region "$AWS_REGION" \
-            --secret-string file://google-credentials.json
+        if aws secretsmanager describe-secret \
+            --secret-id "pronote-credentials" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            
+            echo_info "Updating existing Pronote credentials secret..."
+            aws secretsmanager update-secret \
+                --secret-id "pronote-credentials" \
+                --region "$AWS_REGION" \
+                --secret-string file://pronote-credentials.json
+        else
+            echo_info "Creating new Pronote credentials secret..."
+            aws secretsmanager create-secret \
+                --name "pronote-credentials" \
+                --region "$AWS_REGION" \
+                --description "Pronote login credentials for homework sync" \
+                --secret-string file://pronote-credentials.json
+        fi
+        
+        echo_info "Pronote credentials secret configured"
     else
-        echo_info "Creating new secret..."
-        aws secretsmanager create-secret \
-            --name "$GOOGLE_CREDENTIALS_SECRET_NAME" \
-            --region "$AWS_REGION" \
-            --description "Google Calendar API credentials for Pronote sync" \
-            --secret-string file://google-credentials.json
+        echo_warn "pronote-credentials.json not found"
+        echo_info "Please create pronote-credentials.json with format:"
+        echo_info '{"url": "https://your-pronote-instance.com", "username": "your_username", "password": "your_password"}'
     fi
-    
-    echo_info "Google credentials secret configured"
 }
 
 # Test the deployed function
@@ -223,15 +236,17 @@ main() {
     echo ""
     
     check_prerequisites
-    validate_env_vars
     set_s3_bucket
     
-    # Ask if user wants to setup Google credentials
-    read -p "Do you want to setup Google Calendar credentials? (y/n): " -n 1 -r
+    # Ask if user wants to setup secrets
+    read -p "Do you want to setup AWS Secrets Manager secrets? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        setup_google_credentials
+        setup_secrets
     fi
+    
+    # Validate that secrets exist before deployment
+    validate_secrets
     
     build_sam
     deploy_sam

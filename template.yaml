@@ -17,29 +17,6 @@ Globals:
         PRONOTE_CREDENTIALS_SECRET_NAME: "pronote-credentials"
 # Parameters for deployment
 Parameters:
-  PronoteUrl:
-    Type: String
-    Description: 'Pronote instance URL (e.g., https://school.pronote.net)'
-    
-  PronoteUsername:
-    Type: String
-    Description: 'Pronote username'
-    NoEcho: true
-    
-  PronotePassword:
-    Type: String
-    Description: 'Pronote password'
-    NoEcho: true
-    
-  GoogleCalendarId:
-    Type: String
-    Description: 'Google Calendar ID where events will be created'
-    
-  GoogleCredentialsSecretName:
-    Type: String
-    Description: 'AWS Secrets Manager secret name containing Google API credentials'
-    Default: 'google-calendar-credentials'
-    
   ScheduleExpression:
     Type: String
     Description: 'CloudWatch Events schedule expression for automatic sync'
@@ -70,17 +47,14 @@ Resources:
       Description: 'Syncs homework assignments from Pronote to Google Calendar'
       Environment:
         Variables:
-          PRONOTE_URL: !Ref PronoteUrl
-          PRONOTE_USERNAME: !Ref PronoteUsername
-          PRONOTE_PASSWORD: !Ref PronotePassword
-          GOOGLE_CALENDAR_ID: !Ref GoogleCalendarId
-          GOOGLE_CREDENTIALS_SECRET_NAME: !Ref GoogleCredentialsSecretName
           SYNC_DAYS_AHEAD: !Ref SyncDaysAhead
           EVENT_DURATION_HOURS: !Ref EventDurationHours
           TIMEZONE: 'Europe/Paris'
       Policies:
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GoogleCredentialsSecretName}*'
+            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:google-calendar-credentials*'
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:pronote-credentials*'
         - CloudWatchLogsFullAccess
       Events:
         ScheduledSync:
@@ -230,4 +204,8 @@ Outputs:
     
   GoogleCredentialsSecret:
     Description: 'AWS Secrets Manager secret name for Google credentials'
-    Value: !Ref GoogleCredentialsSecretName
+    Value: 'google-calendar-credentials'
+    
+  PronoteCredentialsSecret:
+    Description: 'AWS Secrets Manager secret name for Pronote credentials'
+    Value: 'pronote-credentials'

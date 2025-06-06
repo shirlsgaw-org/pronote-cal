@@ -20,7 +20,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     AWS Lambda handler for syncing Pronote homework to Google Calendar.
     
     This function:
-    1. Authenticates with Pronote using environment variables
+    1. Loads Pronote credentials from AWS Secrets Manager
     2. Fetches homework assignments for the next 30 days
     3. Authenticates with Google Calendar API
     4. Creates calendar events for new homework
@@ -36,36 +36,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         logger.info(f"Starting homework sync at {datetime.now()}")
         
-        # Initialize configuration
+        # Initialize configuration (this will load credentials from Secrets Manager)
+        logger.info("Initializing configuration...")
         config = Config()
         
-        # Validate required environment variables
-        required_env_vars = [
-            'PRONOTE_URL', 'PRONOTE_USERNAME', 'PRONOTE_PASSWORD',
-            'GOOGLE_CALENDAR_ID', 'GOOGLE_CREDENTIALS_SECRET_NAME'
-        ]
+        # Log configuration (excluding sensitive data)
+        logger.info(f"Configuration loaded: {config.to_dict()}")
         
-        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {missing_vars}")
+        # Initialize clients using the factory method
+        logger.info("Initializing Pronote client from configuration...")
+        pronote_client = PronoteClient.from_config(config)
         
-        # Initialize clients
-        logger.info("Initializing Pronote client")
-        pronote_client = PronoteClient(
-            url=config.pronote_url,
-            username=config.pronote_username,
-            password=config.pronote_password
-        )
-        
-        logger.info("Initializing Google Calendar client")
+        logger.info("Initializing Google Calendar client...")
         calendar_client = CalendarClient(
             calendar_id=config.google_calendar_id,
-            credentials_secret_name=config.google_credentials_secret_name
+            credentials_secret_name=config.google_credentials_secret_name,
+            aws_region=config.aws_region
         )
         
         # Fetch homework assignments from Pronote
         logger.info("Fetching homework assignments from Pronote")
-        homework_list = pronote_client.get_homework(days_ahead=30)
+        homework_list = pronote_client.get_homework(days_ahead=config.sync_days_ahead)
         logger.info(f"Found {len(homework_list)} homework assignments")
         
         # Process each homework assignment
@@ -77,7 +68,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 # Check if event already exists (basic duplicate detection)
                 event_title = f"{homework['subject']}: {homework['description']}"
                 
-                if calendar_client.event_exists(event_title, homework['due_date']):
+                if calendar_client.event_exists(event_title, homework['due_date'], config.duplicate_detection_hours):
                     logger.debug(f"Event already exists: {event_title}")
                     events_skipped += 1
                     continue
@@ -87,7 +78,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     title=event_title,
                     description=homework.get('detailed_description', ''),
                     due_date=homework['due_date'],
-                    subject=homework['subject']
+                    subject=homework['subject'],
+                    duration_hours=config.event_duration_hours
                 )
                 
                 if event_id:
@@ -108,6 +100,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'events_created': events_created,
                 'events_skipped': events_skipped,
                 'total_homework': len(homework_list),
+                'sync_days_ahead': config.sync_days_ahead,
+                'dry_run': config.dry_run,
                 'timestamp': datetime.now().isoformat()
             })
         }

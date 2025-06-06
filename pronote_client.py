@@ -29,6 +29,26 @@ class PronoteClient:
         self.password = password
         self.client: Optional[Client] = None
         self._authenticated = False
+        
+        # Log initialization (without sensitive data)
+        logger.info(f"Initializing Pronote client for URL: {url}")
+    
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create PronoteClient instance from Config object.
+        
+        Args:
+            config: Config instance with Pronote credentials
+            
+        Returns:
+            PronoteClient instance
+        """
+        return cls(
+            url=config.pronote_url,
+            username=config.pronote_username,
+            password=config.pronote_password
+        )
     
     def authenticate(self) -> bool:
         """

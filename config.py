@@ -1,5 +1,10 @@
+import json
+import logging
 import os
-from typing import Optional
+from typing import Dict, Any, Optional
+
+import boto3
+from botocore.exceptions import ClientError
 
 class Config:
     """
@@ -10,28 +15,95 @@ class Config:
     """
     
     def __init__(self):
-        """Initialize configuration from environment variables."""
+        """Initialize configuration from environment variables and AWS Secrets Manager."""
+        self.logger = logging.getLogger(__name__)
+        self._secrets_client = None
+        self._pronote_credentials = None
         self._validate_required_vars()
     
     @property
+    def secrets_client(self):
+        """Get or create AWS Secrets Manager client."""
+        if self._secrets_client is None:
+            self._secrets_client = boto3.client('secretsmanager', region_name=self.aws_region)
+        return self._secrets_client
+    
+    @property
+    def pronote_credentials_secret_name(self) -> str:
+        """AWS Secrets Manager secret name containing Pronote credentials."""
+        return os.getenv('PRONOTE_CREDENTIALS_SECRET_NAME', '').strip()
+    
+    def _get_pronote_credentials(self) -> Dict[str, str]:
+        """
+        Load Pronote credentials from AWS Secrets Manager.
+        
+        Returns:
+            Dictionary containing url, username, and password
+            
+        Raises:
+            Exception: If unable to retrieve or parse credentials
+        """
+        if self._pronote_credentials is not None:
+            return self._pronote_credentials
+            
+        try:
+            self.logger.info(f"Loading Pronote credentials from secret: {self.pronote_credentials_secret_name}")
+            
+            response = self.secrets_client.get_secret_value(SecretId=self.pronote_credentials_secret_name)
+            credentials_json = json.loads(response['SecretString'])
+            
+            # Validate required fields
+            required_fields = ['url', 'username', 'password']
+            missing_fields = [field for field in required_fields if field not in credentials_json]
+            
+            if missing_fields:
+                raise ValueError(f"Missing required Pronote credential fields: {missing_fields}")
+            
+            self._pronote_credentials = {
+                'url': credentials_json['url'].strip(),
+                'username': credentials_json['username'].strip(),
+                'password': credentials_json['password'].strip()
+            }
+            
+            self.logger.info("Successfully loaded Pronote credentials from Secrets Manager")
+            return self._pronote_credentials
+            
+        except ClientError as e:
+            error_msg = f"AWS Secrets Manager error loading Pronote credentials: {str(e)}"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid JSON format in Pronote credentials: {str(e)}"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
+        except Exception as e:
+            error_msg = f"Failed to load Pronote credentials: {str(e)}"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
+    
+    @property
     def pronote_url(self) -> str:
-        """Pronote instance URL."""
-        return os.getenv('PRONOTE_URL', '').strip()
+        """Pronote instance URL from Secrets Manager."""
+        return self._get_pronote_credentials()['url']
     
     @property
     def pronote_username(self) -> str:
-        """Pronote username."""
-        return os.getenv('PRONOTE_USERNAME', '').strip()
+        """Pronote username from Secrets Manager."""
+        return self._get_pronote_credentials()['username']
     
     @property
     def pronote_password(self) -> str:
-        """Pronote password."""
-        return os.getenv('PRONOTE_PASSWORD', '').strip()
+        """Pronote password from Secrets Manager."""
+        return self._get_pronote_credentials()['password']
     
     @property
     def google_calendar_id(self) -> str:
         """Google Calendar ID where events will be created."""
-        return os.getenv('GOOGLE_CALENDAR_ID', '').strip()
+        # Try both possible environment variable names
+        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '').strip()
+        if not calendar_id:
+            calendar_id = os.getenv('CALENDAR_ID', '').strip()
+        return calendar_id
     
     @property
     def google_credentials_secret_name(self) -> str:
@@ -95,10 +167,7 @@ class Config:
             ValueError: If any required environment variables are missing.
         """
         required_vars = [
-            'PRONOTE_URL',
-            'PRONOTE_USERNAME', 
-            'PRONOTE_PASSWORD',
-            'GOOGLE_CALENDAR_ID',
+            'PRONOTE_CREDENTIALS_SECRET_NAME',
             'GOOGLE_CREDENTIALS_SECRET_NAME'
         ]
         
@@ -107,6 +176,13 @@ class Config:
             value = os.getenv(var, '').strip()
             if not value:
                 missing_vars.append(var)
+        
+        # Check for Google Calendar ID (either variable name)
+        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '').strip()
+        if not calendar_id:
+            calendar_id = os.getenv('CALENDAR_ID', '').strip()
+        if not calendar_id:
+            missing_vars.append('GOOGLE_CALENDAR_ID or CALENDAR_ID')
         
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
@@ -123,6 +199,8 @@ class Config:
         """
         if service.lower() == 'google':
             return self.google_credentials_secret_name
+        elif service.lower() == 'pronote':
+            return self.pronote_credentials_secret_name
         else:
             raise ValueError(f"Unknown service: {service}")
     
@@ -133,9 +211,17 @@ class Config:
         Returns:
             Dictionary of non-sensitive configuration values
         """
+        try:
+            # Only include pronote_url if credentials are successfully loaded
+            pronote_url = self.pronote_url if self._pronote_credentials else "Not loaded"
+        except Exception:
+            pronote_url = "Error loading"
+            
         return {
-            'pronote_url': self.pronote_url,
+            'pronote_url': pronote_url,
             'google_calendar_id': self.google_calendar_id,
+            'pronote_credentials_secret_name': self.pronote_credentials_secret_name,
+            'google_credentials_secret_name': self.google_credentials_secret_name,
             'aws_region': self.aws_region,
             'log_level': self.log_level,
             'sync_days_ahead': self.sync_days_ahead,
