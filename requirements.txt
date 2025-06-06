@@ -1,0 +1,26 @@
+# AWS Lambda Python 3.11 Dependencies
+# Core AWS SDK
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Pronote API client
+pronotepy>=2.11.0
+
+# Google Calendar API
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.2.0
+
+# HTTP requests and utilities
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Date/time handling
+python-dateutil>=2.8.2
+
+# JSON handling (usually included in Python, but good to be explicit)
+simplejson>=3.19.0
+
+# Cryptography for secure operations
+cryptography>=41.0.0

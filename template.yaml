@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Pronote to Google Calendar Sync - AWS Lambda function for syncing homework assignments'
+
+# Global configuration
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 256
+    Runtime: python3.11
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        AWS_REGION: !Ref AWS::Region
+
+# Parameters for deployment
+Parameters:
+  PronoteUrl:
+    Type: String
+    Description: 'Pronote instance URL (e.g., https://school.pronote.net)'
+    
+  PronoteUsername:
+    Type: String
+    Description: 'Pronote username'
+    NoEcho: true
+    
+  PronotePassword:
+    Type: String
+    Description: 'Pronote password'
+    NoEcho: true
+    
+  GoogleCalendarId:
+    Type: String
+    Description: 'Google Calendar ID where events will be created'
+    
+  GoogleCredentialsSecretName:
+    Type: String
+    Description: 'AWS Secrets Manager secret name containing Google API credentials'
+    Default: 'google-calendar-credentials'
+    
+  ScheduleExpression:
+    Type: String
+    Description: 'CloudWatch Events schedule expression for automatic sync'
+    Default: 'rate(12 hours)'
+    
+  SyncDaysAhead:
+    Type: Number
+    Description: 'Number of days ahead to sync homework assignments'
+    Default: 30
+    MinValue: 1
+    MaxValue: 90
+    
+  EventDurationHours:
+    Type: Number
+    Description: 'Default duration for homework events in hours'
+    Default: 2
+    MinValue: 1
+    MaxValue: 8
+
+Resources:
+  # Main Lambda function
+  PronoteCalendarSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: pronote-calendar-sync
+      CodeUri: ./
+      Handler: lambda_function.lambda_handler
+      Description: 'Syncs homework assignments from Pronote to Google Calendar'
+      Environment:
+        Variables:
+          PRONOTE_URL: !Ref PronoteUrl
+          PRONOTE_USERNAME: !Ref PronoteUsername
+          PRONOTE_PASSWORD: !Ref PronotePassword
+          GOOGLE_CALENDAR_ID: !Ref GoogleCalendarId
+          GOOGLE_CREDENTIALS_SECRET_NAME: !Ref GoogleCredentialsSecretName
+          SYNC_DAYS_AHEAD: !Ref SyncDaysAhead
+          EVENT_DURATION_HOURS: !Ref EventDurationHours
+          TIMEZONE: 'Europe/Paris'
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GoogleCredentialsSecretName}*'
+        - CloudWatchLogsFullAccess
+      Events:
+        ScheduledSync:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: 'Scheduled homework sync from Pronote to Google Calendar'
+            Enabled: true
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt SyncDeadLetterQueue.Arn
+      ReservedConcurrencyLimit: 1  # Prevent concurrent executions
+      
+  # Health check function
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: pronote-calendar-sync-health
+      CodeUri: ./
+      Handler: lambda_function.health_check
+      Description: 'Health check endpoint for Pronote Calendar Sync'
+      Timeout: 30
+      MemorySize: 128
+      
+  # Dead Letter Queue for failed executions
+  SyncDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: pronote-calendar-sync-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 60
+      
+  # CloudWatch Log Group with retention
+  SyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/pronote-calendar-sync'
+      RetentionInDays: 30
+      
+  # CloudWatch Alarms for monitoring
+  SyncErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'PronoteCalendarSync-Errors'
+      AlarmDescription: 'Alarm for errors in Pronote Calendar Sync function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PronoteCalendarSyncFunction
+      TreatMissingData: notBreaching
+      
+  SyncDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'PronoteCalendarSync-Duration'
+      AlarmDescription: 'Alarm for long execution times in Pronote Calendar Sync'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 240000  # 4 minutes (function timeout is 5 minutes)
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PronoteCalendarSyncFunction
+      TreatMissingData: notBreaching
+      
+  # SNS Topic for notifications (optional)
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: 'pronote-calendar-sync-notifications'
+      DisplayName: 'Pronote Calendar Sync Notifications'
+      
+  # IAM Role for manual execution (optional)
+  ManualExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'PronoteCalendarSyncManualExecution'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: InvokeLambdaFunction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt PronoteCalendarSyncFunction.Arn
+
+# Outputs
+Outputs:
+  PronoteCalendarSyncFunction:
+    Description: 'Lambda Function ARN for Pronote Calendar Sync'
+    Value: !GetAtt PronoteCalendarSyncFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-PronoteCalendarSyncFunction'
+      
+  PronoteCalendarSyncFunctionName:
+    Description: 'Lambda Function Name for Pronote Calendar Sync'
+    Value: !Ref PronoteCalendarSyncFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-PronoteCalendarSyncFunctionName'
+      
+  HealthCheckFunction:
+    Description: 'Lambda Function ARN for Health Check'
+    Value: !GetAtt HealthCheckFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthCheckFunction'
+      
+  SyncLogGroup:
+    Description: 'CloudWatch Log Group for sync function'
+    Value: !Ref SyncLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SyncLogGroup'
+      
+  DeadLetterQueue:
+    Description: 'SQS Dead Letter Queue for failed executions'
+    Value: !Ref SyncDeadLetterQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-DeadLetterQueue'
+      
+  NotificationTopic:
+    Description: 'SNS Topic for notifications'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic'
+      
+  ScheduleExpression:
+    Description: 'Schedule expression for automatic sync'
+    Value: !Ref ScheduleExpression
+    
+  GoogleCredentialsSecret:
+    Description: 'AWS Secrets Manager secret name for Google credentials'
+    Value: !Ref GoogleCredentialsSecretName
