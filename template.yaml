@@ -40,6 +40,7 @@ Resources:
   # Main Lambda function
   PronoteCalendarSyncFunction:
     Type: AWS::Serverless::Function
+    ReservedConcurrencyLimit: 1
     Properties:
       FunctionName: pronote-calendar-sync
       CodeUri: ./
@@ -66,8 +67,7 @@ Resources:
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt SyncDeadLetterQueue.Arn
-      ReservedConcurrencyLimit: 1  # Prevent concurrent executions
-      
+
   # Health check function
   HealthCheckFunction:
     Type: AWS::Serverless::Function

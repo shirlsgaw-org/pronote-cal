@@ -125,9 +125,10 @@ deploy_sam() {
     sam deploy \
         --stack-name "$STACK_NAME" \
         --s3-bucket "$S3_BUCKET" \
-        --capabilities CAPABILITY_IAM \
+        --capabilities CAPABILITY_NAMED_IAM \
         --region "$AWS_REGION" \
-        --confirm-changeset
+        --resolve-s3 \
+        --no-confirm-changeset
     
     echo_info "Deployment completed"
 }
