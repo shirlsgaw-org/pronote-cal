@@ -15,10 +15,11 @@ class Config:
     """
     
     def __init__(self):
-        """Initialize configuration from environment variables and AWS Secrets Manager."""
+        """Initialize configuration from environment variables."""
         self.logger = logging.getLogger(__name__)
         self._secrets_client = None
         self._pronote_credentials = None
+        self._google_credentials = None
         self._validate_required_vars()
     
     @property
@@ -32,6 +33,11 @@ class Config:
     def pronote_credentials_secret_name(self) -> str:
         """AWS Secrets Manager secret name containing Pronote credentials."""
         return os.getenv('PRONOTE_CREDENTIALS_SECRET_NAME', '').strip()
+    
+    @property
+    def google_credentials_secret_name(self) -> str:
+        """AWS Secrets Manager secret name containing Google API credentials."""
+        return os.getenv('GOOGLE_CREDENTIALS_SECRET_NAME', '').strip()
     
     def _get_pronote_credentials(self) -> Dict[str, str]:
         """
@@ -99,16 +105,7 @@ class Config:
     @property
     def google_calendar_id(self) -> str:
         """Google Calendar ID where events will be created."""
-        # Try both possible environment variable names
-        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '').strip()
-        if not calendar_id:
-            calendar_id = os.getenv('CALENDAR_ID', '').strip()
-        return calendar_id
-    
-    @property
-    def google_credentials_secret_name(self) -> str:
-        """AWS Secrets Manager secret name containing Google API credentials."""
-        return os.getenv('GOOGLE_CREDENTIALS_SECRET_NAME', '').strip()
+        return os.getenv('GOOGLE_CALENDAR_ID', '').strip()
     
     @property
     def aws_region(self) -> str:
@@ -146,19 +143,6 @@ class Config:
         """Whether to run in dry-run mode (no actual calendar events created)."""
         return os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
     
-    @property
-    def event_prefix(self) -> str:
-        """Prefix for homework events in calendar."""
-        return os.getenv('EVENT_PREFIX', 'Homework')
-    
-    @property
-    def duplicate_detection_hours(self) -> int:
-        """Hours within which to check for duplicate events."""
-        try:
-            return int(os.getenv('DUPLICATE_DETECTION_HOURS', '24'))
-        except ValueError:
-            return 24
-    
     def _validate_required_vars(self) -> None:
         """
         Validate that all required environment variables are set.
@@ -168,7 +152,8 @@ class Config:
         """
         required_vars = [
             'PRONOTE_CREDENTIALS_SECRET_NAME',
-            'GOOGLE_CREDENTIALS_SECRET_NAME'
+            'GOOGLE_CREDENTIALS_SECRET_NAME',
+            'GOOGLE_CALENDAR_ID'
         ]
         
         missing_vars = []
@@ -177,32 +162,8 @@ class Config:
             if not value:
                 missing_vars.append(var)
         
-        # Check for Google Calendar ID (either variable name)
-        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '').strip()
-        if not calendar_id:
-            calendar_id = os.getenv('CALENDAR_ID', '').strip()
-        if not calendar_id:
-            missing_vars.append('GOOGLE_CALENDAR_ID or CALENDAR_ID')
-        
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-    
-    def get_secret_name(self, service: str) -> str:
-        """
-        Get the AWS Secrets Manager secret name for a service.
-        
-        Args:
-            service: Service name (e.g., 'google', 'pronote')
-            
-        Returns:
-            Secret name for the service
-        """
-        if service.lower() == 'google':
-            return self.google_credentials_secret_name
-        elif service.lower() == 'pronote':
-            return self.pronote_credentials_secret_name
-        else:
-            raise ValueError(f"Unknown service: {service}")
     
     def to_dict(self) -> dict:
         """
@@ -227,7 +188,5 @@ class Config:
             'sync_days_ahead': self.sync_days_ahead,
             'event_duration_hours': self.event_duration_hours,
             'timezone': self.timezone,
-            'dry_run': self.dry_run,
-            'event_prefix': self.event_prefix,
-            'duplicate_detection_hours': self.duplicate_detection_hours
+            'dry_run': self.dry_run
         }
