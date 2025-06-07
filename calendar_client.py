@@ -105,9 +105,10 @@ class CalendarClient:
             raise Exception(f"Invalid JSON format in credentials: {str(e)}")
     
     def create_event(self, title: str, description: str, due_date: datetime.date, 
-                    subject: str, duration_hours: int = 2) -> Optional[str]:
+                    subject: str, duration_hours: int = 2, content_hash: str = None,
+                    assignment_type: str = 'homework') -> Optional[str]:
         """
-        Create a homework event in Google Calendar.
+        Create a homework event in Google Calendar with content hash for idempotency.
         
         Args:
             title: Event title
@@ -115,6 +116,8 @@ class CalendarClient:
             due_date: Due date for the homework
             subject: Subject name
             duration_hours: Event duration in hours
+            content_hash: SHA256 hash for idempotency
+            assignment_type: Type of assignment (homework, test, etc.)
             
         Returns:
             Event ID if successful, None otherwise
@@ -151,10 +154,13 @@ class CalendarClient:
                 },
                 'extendedProperties': {
                     'private': {
-                        'source': 'pronote-homework-sync',
+                        'source': 'pronote',
+                        'pronote_hash': content_hash or '',
+                        'assignment_type': assignment_type,
                         'subject': subject,
                         'due_date': due_date.isoformat(),
-                        'created_by': 'lambda'
+                        'created_by': 'lambda',
+                        'sync_version': '2.0'
                     }
                 }
             }
@@ -178,54 +184,136 @@ class CalendarClient:
             logger.error(f"Error creating event: {str(e)}")
             return None
     
-    def event_exists(self, title: str, due_date: datetime.date, 
-                    detection_hours: int = 24) -> bool:
+    def event_exists_by_hash(self, content_hash: str) -> Optional[Dict[str, Any]]:
         """
-        Check if a similar event already exists to avoid duplicates.
+        Check if an event with the given content hash already exists.
         
         Args:
-            title: Event title to check
-            due_date: Due date of the homework
-            detection_hours: Hours around the due date to check for duplicates
+            content_hash: SHA256 hash to search for
             
         Returns:
-            True if similar event exists, False otherwise
+            Existing event data if found, None otherwise
+        """
+        if not self._authenticated:
+            if not self.authenticate():
+                return None
+        
+        try:
+            logger.debug(f"Searching for event with hash: {content_hash[:8]}...")
+            
+            # Search for events with pronote source in extended time range
+            now = datetime.now()
+            start_time = now - timedelta(days=90)  # Look back 90 days
+            end_time = now + timedelta(days=90)   # Look ahead 90 days
+            
+            events_result = self.service.events().list(
+                calendarId=self.calendar_id,
+                timeMin=start_time.isoformat() + 'Z',
+                timeMax=end_time.isoformat() + 'Z',
+                singleEvents=True,
+                maxResults=2500,  # Increase limit to catch more events
+                orderBy='startTime'
+            ).execute()
+            
+            events = events_result.get('items', [])
+            
+            # Check each event for matching hash
+            for event in events:
+                extended_props = event.get('extendedProperties', {}).get('private', {})
+                
+                # Check if this is a Pronote event with matching hash
+                if (extended_props.get('source') == 'pronote' and 
+                    extended_props.get('pronote_hash') == content_hash):
+                    
+                    logger.debug(f"Found existing event with hash {content_hash[:8]}: {event.get('summary')}")
+                    return {
+                        'id': event.get('id'),
+                        'summary': event.get('summary'),
+                        'start': event.get('start'),
+                        'end': event.get('end'),
+                        'extended_properties': extended_props
+                    }
+            
+            logger.debug(f"No existing event found with hash: {content_hash[:8]}")
+            return None
+            
+        except HttpError as e:
+            logger.error(f"Error searching for events by hash: {str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"Error in event_exists_by_hash: {str(e)}")
+            return None
+    
+    def update_event(self, event_id: str, title: str, description: str, due_date: datetime.date,
+                    subject: str, duration_hours: int = 2, content_hash: str = None,
+                    assignment_type: str = 'homework') -> bool:
+        """
+        Update an existing calendar event.
+        
+        Args:
+            event_id: Google Calendar event ID
+            title: Updated event title
+            description: Updated event description
+            due_date: Updated due date
+            subject: Subject name
+            duration_hours: Event duration in hours
+            content_hash: Updated content hash
+            assignment_type: Type of assignment
+            
+        Returns:
+            True if update successful, False otherwise
         """
         if not self._authenticated:
             if not self.authenticate():
                 return False
         
         try:
-            # Define search time range
-            start_time = datetime.combine(due_date, datetime.min.time()) - timedelta(hours=detection_hours)
-            end_time = datetime.combine(due_date, datetime.min.time()) + timedelta(hours=detection_hours)
+            # Convert due date to datetime for the event
+            event_start = datetime.combine(due_date, datetime.min.time().replace(hour=18))
+            event_end = event_start + timedelta(hours=duration_hours)
             
-            # Search for events
-            events_result = self.service.events().list(
+            # Update event object
+            updated_event = {
+                'summary': title,
+                'description': f"{description}\n\nSubject: {subject}\nDue Date: {due_date}",
+                'start': {
+                    'dateTime': event_start.isoformat(),
+                    'timeZone': 'Europe/Paris',
+                },
+                'end': {
+                    'dateTime': event_end.isoformat(),
+                    'timeZone': 'Europe/Paris',
+                },
+                'colorId': self._get_color_for_subject(subject),
+                'extendedProperties': {
+                    'private': {
+                        'source': 'pronote',
+                        'pronote_hash': content_hash or '',
+                        'assignment_type': assignment_type,
+                        'subject': subject,
+                        'due_date': due_date.isoformat(),
+                        'updated_by': 'lambda',
+                        'sync_version': '2.0',
+                        'last_updated': datetime.now().isoformat()
+                    }
+                }
+            }
+            
+            # Update the event
+            updated_event_result = self.service.events().update(
                 calendarId=self.calendar_id,
-                timeMin=start_time.isoformat() + 'Z',
-                timeMax=end_time.isoformat() + 'Z',
-                singleEvents=True,
-                orderBy='startTime',
-                q=title.split(':')[0]  # Search by subject name
+                eventId=event_id,
+                body=updated_event
             ).execute()
             
-            events = events_result.get('items', [])
-            
-            # Check for exact or similar matches
-            for event in events:
-                event_title = event.get('summary', '')
-                if self._titles_match(title, event_title):
-                    logger.debug(f"Found existing event: {event_title}")
-                    return True
-            
-            return False
+            logger.info(f"Updated calendar event: {title} (ID: {event_id})")
+            return True
             
         except HttpError as e:
-            logger.error(f"Error checking for existing events: {str(e)}")
+            logger.error(f"Google Calendar API error updating event: {str(e)}")
             return False
         except Exception as e:
-            logger.error(f"Error in event_exists: {str(e)}")
+            logger.error(f"Error updating event: {str(e)}")
             return False
     
     def _titles_match(self, title1: str, title2: str) -> bool:
@@ -335,13 +423,15 @@ class CalendarClient:
             homework_events = []
             for event in events:
                 extended_props = event.get('extendedProperties', {}).get('private', {})
-                if extended_props.get('source') == 'pronote-homework-sync':
+                if extended_props.get('source') == 'pronote':
                     homework_events.append({
                         'id': event.get('id'),
                         'title': event.get('summary'),
                         'start': event.get('start', {}).get('dateTime'),
                         'subject': extended_props.get('subject'),
-                        'due_date': extended_props.get('due_date')
+                        'due_date': extended_props.get('due_date'),
+                        'pronote_hash': extended_props.get('pronote_hash'),
+                        'assignment_type': extended_props.get('assignment_type')
                     })
             
             return homework_events

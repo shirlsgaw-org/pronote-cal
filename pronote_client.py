@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -133,7 +134,7 @@ class PronoteClient:
     
     def _standardize_homework(self, hw) -> Optional[Dict[str, Any]]:
         """
-        Convert Pronote homework object to standardized format.
+        Convert Pronote homework object to standardized format with content hash.
         
         Args:
             hw: Raw homework object from pronotepy
@@ -169,24 +170,92 @@ class PronoteClient:
             background_color = getattr(hw, 'background_color', '#FFFFFF')
             done = getattr(hw, 'done', False)
             
+            # Determine assignment type (homework vs test/exam)
+            assignment_type = self._determine_assignment_type(hw, description)
+            
+            # Generate content hash for idempotency
+            content_hash = self._generate_content_hash(subject_name, due_date, description)
+            
             # Build standardized homework item
             homework_item = {
-                'id': f"{subject_name}_{due_date}_{hash(description) % 10000}",
+                'id': f"{subject_name}_{due_date}_{content_hash[:8]}",
                 'subject': subject_name,
                 'description': description,
                 'detailed_description': getattr(hw, 'description', ''),
                 'due_date': due_date,
                 'background_color': background_color,
                 'done': done,
+                'assignment_type': assignment_type,
+                'content_hash': content_hash,
                 'created_at': datetime.now().isoformat()
             }
             
-            logger.debug(f"Standardized homework: {homework_item['subject']} - {homework_item['description']}")
+            logger.debug(f"Standardized homework: {homework_item['subject']} - {homework_item['description']} (hash: {content_hash[:8]})")
             return homework_item
             
         except Exception as e:
             logger.error(f"Error standardizing homework: {str(e)}")
             return None
+    
+    def _generate_content_hash(self, subject: str, due_date, description: str) -> str:
+        """
+        Generate a SHA256 hash for homework content to ensure idempotency.
+        
+        Args:
+            subject: Subject name
+            due_date: Due date (date object)
+            description: Assignment description
+            
+        Returns:
+            SHA256 hash string
+        """
+        # Normalize inputs for consistent hashing
+        normalized_subject = subject.strip().lower()
+        normalized_description = description.strip().lower()
+        due_date_str = due_date.strftime('%Y-%m-%d') if hasattr(due_date, 'strftime') else str(due_date)
+        
+        # Create content string for hashing
+        content = f"{normalized_subject}|{due_date_str}|{normalized_description}"
+        
+        # Generate SHA256 hash
+        hash_object = hashlib.sha256(content.encode('utf-8'))
+        content_hash = hash_object.hexdigest()
+        
+        logger.debug(f"Generated content hash {content_hash[:8]} for: {content[:50]}...")
+        return content_hash
+    
+    def _determine_assignment_type(self, hw, description: str) -> str:
+        """
+        Determine the type of assignment (homework, test, exam).
+        
+        Args:
+            hw: Raw homework object from pronotepy
+            description: Assignment description
+            
+        Returns:
+            Assignment type string
+        """
+        # Keywords that indicate tests/exams vs regular homework
+        test_keywords = [
+            'contrôle', 'devoir', 'examen', 'test', 'évaluation', 'ds', 'dm',
+            'interro', 'interrogation', 'bac', 'partiel', 'quiz'
+        ]
+        
+        description_lower = description.lower()
+        
+        # Check if any test keywords are in the description
+        for keyword in test_keywords:
+            if keyword in description_lower:
+                return 'test'
+        
+        # Check for homework-specific indicators
+        homework_keywords = ['exercice', 'devoir maison', 'homework', 'travail']
+        for keyword in homework_keywords:
+            if keyword in description_lower:
+                return 'homework'
+        
+        # Default to homework if unclear
+        return 'homework'
     
     def get_student_info(self) -> Dict[str, Any]:
         """

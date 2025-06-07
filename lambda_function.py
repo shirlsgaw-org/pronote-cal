@@ -59,34 +59,69 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         homework_list = pronote_client.get_homework(days_ahead=config.sync_days_ahead)
         logger.info(f"Found {len(homework_list)} homework assignments")
         
-        # Process each homework assignment
+        # Process each homework assignment with hash-based idempotency
         events_created = 0
+        events_updated = 0
         events_skipped = 0
         
         for homework in homework_list:
             try:
-                # Check if event already exists (basic duplicate detection)
+                content_hash = homework.get('content_hash')
                 event_title = f"{homework['subject']}: {homework['description']}"
                 
-                if calendar_client.event_exists(event_title, homework['due_date'], config.duplicate_detection_hours):
-                    logger.debug(f"Event already exists: {event_title}")
-                    events_skipped += 1
+                if not content_hash:
+                    logger.warning(f"No content hash for homework: {event_title}")
                     continue
                 
-                # Create calendar event
-                event_id = calendar_client.create_event(
-                    title=event_title,
-                    description=homework.get('detailed_description', ''),
-                    due_date=homework['due_date'],
-                    subject=homework['subject'],
-                    duration_hours=config.event_duration_hours
-                )
+                # Check if event with this hash already exists
+                existing_event = calendar_client.event_exists_by_hash(content_hash)
                 
-                if event_id:
-                    logger.info(f"Created event: {event_title} (ID: {event_id})")
-                    events_created += 1
+                if existing_event:
+                    # Event exists - check if we need to update it
+                    existing_title = existing_event.get('summary', '')
+                    
+                    if existing_title != event_title:
+                        # Content has changed - update the event
+                        logger.info(f"Updating existing event {content_hash[:8]}: {existing_title} -> {event_title}")
+                        
+                        success = calendar_client.update_event(
+                            event_id=existing_event['id'],
+                            title=event_title,
+                            description=homework.get('detailed_description', ''),
+                            due_date=homework['due_date'],
+                            subject=homework['subject'],
+                            duration_hours=config.event_duration_hours,
+                            content_hash=content_hash,
+                            assignment_type=homework.get('assignment_type', 'homework')
+                        )
+                        
+                        if success:
+                            events_updated += 1
+                        else:
+                            logger.warning(f"Failed to update event: {event_title}")
+                    else:
+                        # Event exists and is current - skip
+                        logger.debug(f"Event already exists and is current: {event_title} (hash: {content_hash[:8]})")
+                        events_skipped += 1
                 else:
-                    logger.warning(f"Failed to create event: {event_title}")
+                    # No existing event - create new one
+                    logger.info(f"Creating new event: {event_title} (hash: {content_hash[:8]})")
+                    
+                    event_id = calendar_client.create_event(
+                        title=event_title,
+                        description=homework.get('detailed_description', ''),
+                        due_date=homework['due_date'],
+                        subject=homework['subject'],
+                        duration_hours=config.event_duration_hours,
+                        content_hash=content_hash,
+                        assignment_type=homework.get('assignment_type', 'homework')
+                    )
+                    
+                    if event_id:
+                        logger.info(f"Created event: {event_title} (ID: {event_id})")
+                        events_created += 1
+                    else:
+                        logger.warning(f"Failed to create event: {event_title}")
                     
             except Exception as e:
                 logger.error(f"Error processing homework '{homework.get('description', 'Unknown')}': {str(e)}")
@@ -98,15 +133,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'body': json.dumps({
                 'message': 'Homework sync completed successfully',
                 'events_created': events_created,
+                'events_updated': events_updated,
                 'events_skipped': events_skipped,
                 'total_homework': len(homework_list),
                 'sync_days_ahead': config.sync_days_ahead,
                 'dry_run': config.dry_run,
+                'idempotency_method': 'content_hash',
                 'timestamp': datetime.now().isoformat()
             })
         }
         
-        logger.info(f"Sync completed: {events_created} created, {events_skipped} skipped")
+        logger.info(f"Sync completed: {events_created} created, {events_updated} updated, {events_skipped} skipped")
         return response
         
     except Exception as e:
@@ -141,6 +178,6 @@ def health_check(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         'body': json.dumps({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
-            'version': '1.0.0'
+            'version': '2.0.0'
         })
     }
