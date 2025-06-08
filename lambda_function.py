@@ -186,13 +186,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                             exam_events_created += 1
                             
                             # Create study reminders if enabled and exam is in the future
+                            exam_date = exam['exam_date']
+                            if hasattr(exam_date, 'date'):
+                                exam_date = exam_date.date()
+                            
                             if (config.study_reminders_enabled and 
-                                exam['exam_date'] > datetime.now().date()):
+                                exam_date > datetime.now().date()):
                                 
                                 logger.info(f"Creating study reminders for exam: {exam_title}")
                                 reminder_ids = calendar_client.create_study_reminder_events(
                                     exam_title=exam_title,
-                                    exam_date=exam['exam_date'],
+                                    exam_date=exam_date,
                                     subject=exam['subject'],
                                     content_hash_base=content_hash
                                 )

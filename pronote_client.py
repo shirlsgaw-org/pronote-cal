@@ -1,6 +1,6 @@
 import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Any, Optional
 
 # Pronote API imports with error handling
@@ -118,25 +118,44 @@ class PronoteClient:
             # Iterate through periods to get historical data
             for period in self.client.periods:
                 # Skip periods that end before our cutoff date
-                if period.end < cutoff_date:
+                # Convert period.end to date if it's a datetime
+                period_end = period.end
+                if hasattr(period_end, 'date'):
+                    period_end = period_end.date()
+                
+                if period_end < cutoff_date:
                     continue
                 
                 try:
                     # Get evaluations (exam scheduling/metadata)
                     evaluations = period.evaluations
                     for evaluation in evaluations:
-                        if evaluation.date >= cutoff_date:
-                            exam_item = self._standardize_evaluation(evaluation)
-                            if exam_item:
-                                exams_list.append(exam_item)
-                    
-                    # Get grades that represent exam results
-                    grades = period.grades
-                    for grade in grades:
-                        if grade.date >= cutoff_date and self._is_exam_grade(grade):
-                            exam_item = self._standardize_exam_grade(grade)
-                            if exam_item:
-                                exams_list.append(exam_item)
+                        try:
+                            # Convert evaluation.date to date if it's a datetime
+                            eval_date = evaluation.date
+                            if eval_date is None:
+                                continue
+                            
+                            # Handle different date formats
+                            if isinstance(eval_date, str):
+                                try:
+                                    eval_date = datetime.strptime(eval_date, '%Y-%m-%d').date()
+                                except ValueError:
+                                    logger.warning(f"Skipping evaluation with invalid date format: {eval_date}")
+                                    continue
+                            elif hasattr(eval_date, 'date') and callable(getattr(eval_date, 'date')):
+                                eval_date = eval_date.date()
+                            elif not isinstance(eval_date, date):
+                                logger.warning(f"Skipping evaluation with unsupported date type: {type(eval_date)}")
+                                continue
+                            
+                            if eval_date >= cutoff_date:
+                                exam_item = self._standardize_evaluation(evaluation)
+                                if exam_item:
+                                    exams_list.append(exam_item)
+                        except Exception as eval_e:
+                            logger.warning(f"Error processing evaluation: {str(eval_e)}")
+                            continue
                                 
                 except Exception as e:
                     logger.warning(f"Error processing period {period}: {str(e)}")
@@ -326,13 +345,19 @@ class PronoteClient:
                 logger.warning("Evaluation missing date, skipping")
                 return None
             
-            # Convert to datetime if needed
+            # Convert to date object consistently
             if isinstance(exam_date, str):
                 try:
                     exam_date = datetime.strptime(exam_date, '%Y-%m-%d').date()
                 except ValueError:
                     logger.warning(f"Invalid exam date format: {exam_date}")
                     return None
+            elif hasattr(exam_date, 'date') and callable(getattr(exam_date, 'date')):
+                # Convert datetime to date
+                exam_date = exam_date.date()
+            elif not isinstance(exam_date, date):
+                logger.warning(f"Unsupported exam date type: {type(exam_date)}")
+                return None
             
             # Get additional details
             teacher = getattr(evaluation, 'teacher', 'Unknown Teacher')
@@ -363,75 +388,6 @@ class PronoteClient:
             logger.error(f"Error standardizing evaluation: {str(e)}")
             return None
 
-    def _standardize_exam_grade(self, grade) -> Optional[Dict[str, Any]]:
-        """
-        Convert Pronote grade object (from exam) to standardized exam format.
-        
-        Args:
-            grade: Raw grade object from pronotepy
-            
-        Returns:
-            Standardized exam dictionary or None if invalid
-        """
-        try:
-            # Extract basic information
-            subject = getattr(grade, 'subject', {})
-            subject_name = getattr(subject, 'name', 'Unknown Subject')
-            
-            # Get grade details
-            grade_value = getattr(grade, 'grade', '')
-            out_of = getattr(grade, 'out_of', '')
-            comment = getattr(grade, 'comment', '').strip()
-            
-            # Get exam date
-            exam_date = getattr(grade, 'date', None)
-            if not exam_date:
-                logger.warning("Grade missing date, skipping")
-                return None
-            
-            # Convert to datetime if needed
-            if isinstance(exam_date, str):
-                try:
-                    exam_date = datetime.strptime(exam_date, '%Y-%m-%d').date()
-                except ValueError:
-                    logger.warning(f"Invalid exam date format: {exam_date}")
-                    return None
-            
-            # Generate description from grade info
-            description = comment if comment else f"Examen {subject_name}"
-            if grade_value and out_of:
-                description += f" ({grade_value}/{out_of})"
-            
-            # Get additional details
-            coefficient = getattr(grade, 'coefficient', '')
-            average = getattr(grade, 'average', '')
-            
-            # Generate content hash for idempotency
-            content_hash = self._generate_exam_content_hash(subject_name, exam_date, description, 'grade')
-            
-            # Build standardized exam item
-            exam_item = {
-                'id': f"grade_{subject_name}_{exam_date}_{content_hash[:8]}",
-                'subject': subject_name,
-                'description': description,
-                'detailed_description': comment,
-                'exam_date': exam_date,
-                'grade': grade_value,
-                'out_of': out_of,
-                'coefficient': coefficient,
-                'class_average': average,
-                'assignment_type': 'exam',
-                'data_source': 'grade',
-                'content_hash': content_hash,
-                'created_at': datetime.now().isoformat()
-            }
-            
-            logger.debug(f"Standardized exam grade: {exam_item['subject']} - {exam_item['description']} (hash: {content_hash[:8]})")
-            return exam_item
-            
-        except Exception as e:
-            logger.error(f"Error standardizing exam grade: {str(e)}")
-            return None
 
     def _generate_exam_content_hash(self, subject: str, exam_date, description: str, source_type: str) -> str:
         """
@@ -461,40 +417,6 @@ class PronoteClient:
         logger.debug(f"Generated exam content hash {content_hash[:8]} for: {content[:50]}...")
         return content_hash
 
-    def _is_exam_grade(self, grade) -> bool:
-        """
-        Determine if a grade is from an exam/test vs regular homework.
-        
-        Args:
-            grade: Raw grade object from pronotepy
-            
-        Returns:
-            True if grade is from an exam, False otherwise
-        """
-        # Keywords that indicate exams/tests
-        exam_keywords = [
-            'contrôle', 'devoir surveillé', 'ds', 'évaluation', 'test', 'examen',
-            'interro', 'interrogation', 'bac', 'partiel', 'quiz', 'composition'
-        ]
-        
-        # Check comment field for exam indicators
-        comment = getattr(grade, 'comment', '').lower()
-        
-        # Check if any exam keywords are in the comment
-        for keyword in exam_keywords:
-            if keyword in comment:
-                return True
-        
-        # Check coefficient - exams typically have higher coefficients
-        try:
-            coefficient = float(getattr(grade, 'coefficient', '0'))
-            if coefficient >= 2.0:  # Assume exams have coefficient >= 2
-                return True
-        except (ValueError, TypeError):
-            pass
-        
-        # Default to False for homework
-        return False
 
     def _determine_assignment_type(self, hw, description: str) -> str:
         """
