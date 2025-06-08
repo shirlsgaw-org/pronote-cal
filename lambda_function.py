@@ -75,7 +75,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         exams_list = []
         if config.exam_sync_enabled:
             logger.info("Fetching historical exam data from Pronote")
-            exams_list = pronote_client.get_exams(days_back=config.exam_lookback_days)
+            exams_list = pronote_client.get_exams(days_ahead=config.exam_days_ahead)
             logger.info(f"Found {len(exams_list)} exam records")
         
         # Process each homework assignment with hash-based idempotency
@@ -233,7 +233,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'sync_days_ahead': config.sync_days_ahead,
                 'exam_sync_enabled': config.exam_sync_enabled,
                 'study_reminders_enabled': config.study_reminders_enabled,
-                'exam_lookback_days': config.exam_lookback_days,
+                'exam_days_ahead': config.exam_days_ahead,
                 'dry_run': config.dry_run,
                 'idempotency_method': 'content_hash',
                 'timestamp': datetime.now().isoformat()

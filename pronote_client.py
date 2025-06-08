@@ -88,12 +88,12 @@ class PronoteClient:
             logger.error(f"Authentication error: {str(e)}")
             raise Exception(f"Failed to authenticate with Pronote: {str(e)}")
     
-    def get_exams(self, days_back: int = 60) -> List[Dict[str, Any]]:
+    def get_exams(self, days_ahead: int = 30) -> List[Dict[str, Any]]:
         """
-        Fetch exam/evaluation data for the specified number of days back.
+        Fetch exam/evaluation data for the specified number of days ahead.
         
         Args:
-            days_back: Number of days back to fetch exam data for
+            days_ahead: Number of days ahead to fetch exam data for (use negative values for testing with historical data)
             
         Returns:
             List of exam dictionaries with standardized format
@@ -106,29 +106,131 @@ class PronoteClient:
                 raise Exception("Cannot fetch exams: authentication failed")
         
         try:
-            logger.info(f"Fetching exams for past {days_back} days")
-            
-            # Calculate date range
-            current_date = datetime.now().date()
-            cutoff_date = current_date - timedelta(days=days_back)
+            if days_ahead >= 0:
+                logger.info(f"Fetching exams for next {days_ahead} days")
+                start_date = datetime.now().date()
+                end_date = start_date + timedelta(days=days_ahead)
+            else:
+                # Testing mode: negative value means look backward
+                logger.info(f"Fetching exams for past {abs(days_ahead)} days (testing mode)")
+                end_date = datetime.now().date()
+                start_date = end_date + timedelta(days=days_ahead)  # days_ahead is negative
             
             # Fetch exams from Pronote
             exams_list = []
             
-            # Iterate through periods to get historical data
+            # Iterate through periods to get data
+            logger.info(f"Date range: {start_date} to {end_date}")
+            logger.info(f"Found {len(self.client.periods)} periods to check")
+            
+            # Debug: Explore what other methods/properties are available
+            client_attrs = [attr for attr in dir(self.client) if not attr.startswith('_')]
+            logger.info(f"Client has {len(client_attrs)} public methods/attributes")
+            logger.debug(f"Client methods/attributes: {client_attrs}")
+            
+            # Check for specific endpoints we're interested in
+            interesting_attrs = ['lessons', 'grades', 'information_and_surveys', 'menu', 'discussions', 'absences']
+            for attr in interesting_attrs:
+                if hasattr(self.client, attr):
+                    logger.info(f"✅ Found client.{attr}")
+                    try:
+                        value = getattr(self.client, attr)
+                        if hasattr(value, '__len__'):
+                            logger.info(f"  {attr} contains {len(value)} items")
+                    except Exception as e:
+                        logger.debug(f"  Error accessing {attr}: {e}")
+                else:
+                    logger.debug(f"❌ No client.{attr}")
+            
+            # Check if periods have other exam-related methods
+            if self.client.periods:
+                sample_period = self.client.periods[0]
+                period_attrs = [attr for attr in dir(sample_period) if not attr.startswith('_')]
+                logger.info(f"Period has {len(period_attrs)} public methods/attributes")
+                logger.debug(f"Period methods/attributes: {period_attrs}")
+                
+                # Note: period.grades and period.averages exist but have parsing issues with this Pronote instance
+                logger.info("✅ Found period.grades (skipped due to parsing issues in pronotepy)")
+                logger.info("✅ Found period.averages (skipped due to parsing issues in pronotepy)")
+                logger.debug("❌ No period.lessons (lessons are at client level)")
+                        
+            # Now let's explore the working endpoints we found
+            logger.info("🔍 Exploring available endpoints...")
+            
+            # Check client.lessons for test/exam information
+            try:
+                logger.info("Checking client.lessons...")
+                # lessons might require date parameters
+                today = datetime.now().date()
+                lessons_today = self.client.lessons(today)
+                logger.info(f"Found {len(lessons_today)} lessons for today")
+                
+                # Check a broader date range
+                lessons_week = self.client.lessons(start_date, end_date)
+                logger.info(f"Found {len(lessons_week)} lessons in date range")
+                
+                # Look for lessons that might be exams
+                for lesson in lessons_week[:10]:  # Sample first 10
+                    # Properly extract subject name
+                    lesson_subject_obj = getattr(lesson, 'subject', None)
+                    if lesson_subject_obj and hasattr(lesson_subject_obj, 'name'):
+                        lesson_subject = lesson_subject_obj.name
+                    else:
+                        lesson_subject = 'Unknown Subject'
+                    
+                    lesson_content = getattr(lesson, 'content', '')
+                    lesson_start = getattr(lesson, 'start', None)
+                    lesson_status = getattr(lesson, 'status', '')
+                    
+                    # Check if this might be a test/exam lesson
+                    if lesson_content and any(keyword in lesson_content.lower() for keyword in 
+                                            ['contrôle', 'test', 'évaluation', 'ds', 'interro', 'examen']):
+                        logger.info(f"🎓 EXAM LESSON: {lesson_subject} - {lesson_content} at {lesson_start}")
+                    else:
+                        logger.debug(f"Lesson: {lesson_subject} - {lesson_content} at {lesson_start} (status: {lesson_status})")
+                        
+                    # Look specifically for math subjects
+                    if lesson_subject and ('math' in lesson_subject.lower() or 'mathématiques' in lesson_subject.lower()):
+                        logger.info(f"🔢 MATH LESSON: {lesson_subject} - {lesson_content} at {lesson_start}")
+                    
+            except Exception as e:
+                logger.warning(f"Error exploring client.lessons: {e}")
+                
+            # Check client.information_and_surveys
+            try:
+                logger.info("Checking client.information_and_surveys...")
+                info_surveys = self.client.information_and_surveys
+                logger.info(f"Found {len(info_surveys)} information/survey items")
+                
+                for item in info_surveys[:3]:  # Sample first 3
+                    item_title = getattr(item, 'title', 'No title')
+                    item_content = getattr(item, 'content', 'No content')
+                    logger.info(f"Info/Survey: {item_title} - {item_content[:100]}...")
+                    
+            except Exception as e:
+                logger.warning(f"Error exploring client.information_and_surveys: {e}")
+            
             for period in self.client.periods:
-                # Skip periods that end before our cutoff date
-                # Convert period.end to date if it's a datetime
+                # Convert period dates to date objects
+                period_start = period.start
+                if hasattr(period_start, 'date'):
+                    period_start = period_start.date()
                 period_end = period.end
                 if hasattr(period_end, 'date'):
                     period_end = period_end.date()
                 
-                if period_end < cutoff_date:
+                # Skip periods that don't overlap with our date range
+                logger.debug(f"Period: {period_start} to {period_end}")
+                if period_end < start_date or period_start > end_date:
+                    logger.debug(f"Skipping period outside date range")
                     continue
+                    
+                logger.info(f"Processing period: {period_start} to {period_end}")
                 
                 try:
                     # Get evaluations (exam scheduling/metadata)
                     evaluations = period.evaluations
+                    logger.info(f"Found {len(evaluations)} evaluations in this period")
                     for evaluation in evaluations:
                         try:
                             # Convert evaluation.date to date if it's a datetime
@@ -149,10 +251,16 @@ class PronoteClient:
                                 logger.warning(f"Skipping evaluation with unsupported date type: {type(eval_date)}")
                                 continue
                             
-                            if eval_date >= cutoff_date:
+                            logger.debug(f"Evaluation date: {eval_date}, in range: {start_date <= eval_date <= end_date}")
+                            if start_date <= eval_date <= end_date:
+                                logger.info(f"Found exam in date range: {getattr(evaluation, 'name', 'Unknown')} on {eval_date}")
                                 exam_item = self._standardize_evaluation(evaluation)
                                 if exam_item:
                                     exams_list.append(exam_item)
+                                else:
+                                    logger.warning(f"Failed to standardize evaluation: {getattr(evaluation, 'name', 'Unknown')}")
+                            else:
+                                logger.debug(f"Skipping evaluation outside date range: {getattr(evaluation, 'name', 'Unknown')} on {eval_date}")
                         except Exception as eval_e:
                             logger.warning(f"Error processing evaluation: {str(eval_e)}")
                             continue
@@ -161,15 +269,23 @@ class PronoteClient:
                     logger.warning(f"Error processing period {period}: {str(e)}")
                     continue
             
+            # Also get test events from homework
+            logger.info("Extracting test events from homework assignments...")
+            test_events_from_homework = self.get_test_events_from_homework(days_ahead=days_ahead)
+            
+            # Combine evaluation-based exams and homework-based test events
+            all_exams = exams_list + test_events_from_homework
+            
             # Remove duplicates based on content hash
             unique_exams = {}
-            for exam in exams_list:
+            for exam in all_exams:
                 content_hash = exam.get('content_hash')
                 if content_hash and content_hash not in unique_exams:
                     unique_exams[content_hash] = exam
             
             final_exams = list(unique_exams.values())
-            logger.info(f"Retrieved {len(final_exams)} unique exam records")
+            logger.info(f"Retrieved {len(exams_list)} evaluation-based exams and {len(test_events_from_homework)} homework-based tests")
+            logger.info(f"Total unique exam records: {len(final_exams)}")
             return final_exams
             
         except Exception as e:
@@ -181,7 +297,7 @@ class PronoteClient:
         Fetch homework assignments for the specified number of days ahead.
         
         Args:
-            days_ahead: Number of days ahead to fetch homework for
+            days_ahead: Number of days ahead to fetch homework for (use negative values for testing with historical data)
             
         Returns:
             List of homework dictionaries with standardized format
@@ -194,11 +310,15 @@ class PronoteClient:
                 raise Exception("Cannot fetch homework: authentication failed")
         
         try:
-            logger.info(f"Fetching homework for next {days_ahead} days")
-            
-            # Calculate date range
-            start_date = datetime.now().date()
-            end_date = start_date + timedelta(days=days_ahead)
+            if days_ahead >= 0:
+                logger.info(f"Fetching homework for next {days_ahead} days")
+                start_date = datetime.now().date()
+                end_date = start_date + timedelta(days=days_ahead)
+            else:
+                # Testing mode: negative value means look backward
+                logger.info(f"Fetching homework for past {abs(days_ahead)} days (testing mode)")
+                end_date = datetime.now().date()
+                start_date = end_date + timedelta(days=days_ahead)  # days_ahead is negative
             
             # Fetch homework from Pronote
             homework_list = []
@@ -431,11 +551,24 @@ class PronoteClient:
         """
         # Keywords that indicate tests/exams vs regular homework
         test_keywords = [
-            'contrôle', 'devoir', 'examen', 'test', 'évaluation', 'ds', 'dm',
-            'interro', 'interrogation', 'bac', 'partiel', 'quiz'
+            'contrôle', 'devoir surveillé', 'examen', 'test', 'évaluation', 'ds', 'dm',
+            'interro', 'interrogation', 'bac', 'partiel', 'quiz', 'brevet',
+            'réviser pour', 'reviser pour', 'préparer pour', 'preparer pour',
+            'evaluation de', 'évaluation de', 'test de', 'controle de', 'contrôle de'
         ]
         
         description_lower = description.lower()
+        
+        # First check for non-test keywords (administrative tasks)
+        non_test_keywords = [
+            'form', 'formulaire', 'complete this form', 'survey', 'vote', 'registration',
+            'bring', 'apporter', 'rendre', 'submit', 'turn in', 'due before midnight',
+            'tattoo', 'art show', 'favorite piece', 'please complete this form'
+        ]
+        
+        for non_keyword in non_test_keywords:
+            if non_keyword in description_lower:
+                return 'homework'  # Force it to be homework, not a test
         
         # Check if any test keywords are in the description
         for keyword in test_keywords:
@@ -450,6 +583,58 @@ class PronoteClient:
         
         # Default to homework if unclear
         return 'homework'
+    
+    def get_test_events_from_homework(self, days_ahead: int = 30) -> List[Dict[str, Any]]:
+        """
+        Extract test/exam events from homework assignments.
+        
+        This looks for homework that appears to be test preparation or actual tests
+        and converts them into exam-like events.
+        
+        Args:
+            days_ahead: Number of days ahead to search (use negative for historical)
+            
+        Returns:
+            List of exam-like dictionaries extracted from test-related homework
+        """
+        try:
+            # Get all homework for the period
+            homework_list = self.get_homework(days_ahead=days_ahead)
+            
+            test_events = []
+            
+            for hw in homework_list:
+                assignment_type = hw.get('assignment_type', 'homework')
+                
+                if assignment_type == 'test':
+                    # Convert test-related homework to exam event format
+                    exam_event = {
+                        'id': f"test_hw_{hw['id']}",
+                        'subject': hw['subject'],
+                        'description': hw['description'],
+                        'detailed_description': hw['detailed_description'],
+                        'exam_date': hw['due_date'],
+                        'teacher': 'Unknown Teacher',  # Not available from homework
+                        'coefficient': 1,  # Not available from homework
+                        'assignment_type': 'exam',
+                        'data_source': 'homework_test',
+                        'content_hash': self._generate_exam_content_hash(
+                            hw['subject'], 
+                            hw['due_date'], 
+                            hw['description'], 
+                            'homework_test'
+                        ),
+                        'created_at': hw['created_at']
+                    }
+                    test_events.append(exam_event)
+                    logger.info(f"Converted test homework to exam: {hw['subject']} - {hw['description']}")
+            
+            logger.info(f"Extracted {len(test_events)} test events from homework")
+            return test_events
+            
+        except Exception as e:
+            logger.error(f"Error extracting test events from homework: {str(e)}")
+            return []
     
     def get_student_info(self) -> Dict[str, Any]:
         """

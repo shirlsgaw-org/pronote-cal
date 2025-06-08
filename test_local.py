@@ -17,7 +17,7 @@ os.environ['AWS_REGION'] = 'us-west-2'
 os.environ['LOG_LEVEL'] = 'DEBUG'
 os.environ['DRY_RUN'] = 'true'  # Safe mode - won't create actual calendar events
 os.environ['EXAM_SYNC_ENABLED'] = 'true'
-os.environ['EXAM_LOOKBACK_DAYS'] = '60'
+os.environ['EXAM_DAYS_AHEAD'] = '-60'
 os.environ['STUDY_REMINDERS_ENABLED'] = 'true'
 
 # Set up logging
@@ -25,6 +25,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Make sure all loggers use DEBUG level
+logging.getLogger('pronote_client').setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Import your Lambda function
@@ -89,14 +91,35 @@ def test_pronote_client_only():
         
         if config.exam_sync_enabled:
             print("🎓 Testing exam fetch...")
-            exams_list = pronote_client.get_exams(days_back=60)
+            exams_list = pronote_client.get_exams(days_ahead=-60)
             print(f"Found {len(exams_list)} exam records")
             
             # Print sample exam data
             if exams_list:
                 print("\n📋 Sample exam data:")
-                for i, exam in enumerate(exams_list[:3]):  # Show first 3
-                    print(f"  {i+1}. {exam['subject']}: {exam['description']} on {exam['exam_date']}")
+                for i, exam in enumerate(exams_list[:10]):  # Show first 10 now
+                    data_source = exam.get('data_source', 'unknown')
+                    print(f"  {i+1}. [{data_source}] {exam['subject']}: {exam['description']} on {exam['exam_date']}")
+                    
+                # Show breakdown by data source
+                evaluation_count = len([e for e in exams_list if e.get('data_source') == 'evaluation'])
+                homework_test_count = len([e for e in exams_list if e.get('data_source') == 'homework_test'])
+                print(f"\n📊 Breakdown: {evaluation_count} from evaluations, {homework_test_count} from test-related homework")
+            
+            # Also test homework in the same period to compare
+            print("\n📚 Testing homework in same historical period...")
+            historical_homework = pronote_client.get_homework(days_ahead=-60)
+            print(f"Found {len(historical_homework)} historical homework assignments")
+            if historical_homework:
+                print("📋 Sample historical homework:")
+                for i, hw in enumerate(historical_homework[:5]):  # Show first 5
+                    print(f"  {i+1}. {hw['subject']}: {hw['description']} due {hw['due_date']}")
+                
+                # Show test-related homework specifically
+                test_homework = [hw for hw in historical_homework if hw.get('assignment_type') == 'test']
+                print(f"\n🧪 Found {len(test_homework)} test-related homework items:")
+                for i, hw in enumerate(test_homework[:10]):  # Show up to 10 test items
+                    print(f"  {i+1}. {hw['subject']}: {hw['description']} due {hw['due_date']}")
         
         pronote_client.close()
         print("✅ Pronote client test completed successfully!")

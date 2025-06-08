@@ -149,12 +149,12 @@ class Config:
         return os.getenv('EXAM_SYNC_ENABLED', 'true').lower() in ('true', '1', 'yes')
     
     @property
-    def exam_lookback_days(self) -> int:
-        """Number of days back to fetch historical exam data."""
+    def exam_days_ahead(self) -> int:
+        """Number of days ahead to fetch exam data (for testing with historical data, use negative values)."""
         try:
-            return int(os.getenv('EXAM_LOOKBACK_DAYS', '60'))
+            return int(os.getenv('EXAM_DAYS_AHEAD', '-60'))
         except ValueError:
-            return 60
+            return -60
     
     @property
     def study_reminders_enabled(self) -> bool:
@@ -229,7 +229,7 @@ class Config:
             'timezone': self.timezone,
             'dry_run': self.dry_run,
             'exam_sync_enabled': self.exam_sync_enabled,
-            'exam_lookback_days': self.exam_lookback_days,
+            'exam_days_ahead': self.exam_days_ahead,
             'study_reminders_enabled': self.study_reminders_enabled,
             'study_reminder_days_before': self.study_reminder_days_before,
             'study_reminder_time_pst': self.study_reminder_time_pst,
