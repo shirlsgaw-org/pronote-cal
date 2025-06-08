@@ -143,6 +143,45 @@ class Config:
         """Whether to run in dry-run mode (no actual calendar events created)."""
         return os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
     
+    @property
+    def exam_sync_enabled(self) -> bool:
+        """Whether to sync exam data in addition to homework."""
+        return os.getenv('EXAM_SYNC_ENABLED', 'true').lower() in ('true', '1', 'yes')
+    
+    @property
+    def exam_lookback_days(self) -> int:
+        """Number of days back to fetch historical exam data."""
+        try:
+            return int(os.getenv('EXAM_LOOKBACK_DAYS', '60'))
+        except ValueError:
+            return 60
+    
+    @property
+    def study_reminders_enabled(self) -> bool:
+        """Whether to create study reminder events for exams."""
+        return os.getenv('STUDY_REMINDERS_ENABLED', 'true').lower() in ('true', '1', 'yes')
+    
+    @property
+    def study_reminder_days_before(self) -> int:
+        """Number of days before exam to start creating study reminders."""
+        try:
+            return int(os.getenv('STUDY_REMINDER_DAYS_BEFORE', '7'))
+        except ValueError:
+            return 7
+    
+    @property
+    def study_reminder_time_pst(self) -> str:
+        """Time in PST to create study reminders (24-hour format, e.g., '16:00')."""
+        return os.getenv('STUDY_REMINDER_TIME_PST', '16:00')
+    
+    @property
+    def exam_event_duration_hours(self) -> int:
+        """Default duration for exam events in hours."""
+        try:
+            return int(os.getenv('EXAM_EVENT_DURATION_HOURS', '2'))
+        except ValueError:
+            return 2
+    
     def _validate_required_vars(self) -> None:
         """
         Validate that all required environment variables are set.
@@ -188,5 +227,11 @@ class Config:
             'sync_days_ahead': self.sync_days_ahead,
             'event_duration_hours': self.event_duration_hours,
             'timezone': self.timezone,
-            'dry_run': self.dry_run
+            'dry_run': self.dry_run,
+            'exam_sync_enabled': self.exam_sync_enabled,
+            'exam_lookback_days': self.exam_lookback_days,
+            'study_reminders_enabled': self.study_reminders_enabled,
+            'study_reminder_days_before': self.study_reminder_days_before,
+            'study_reminder_time_pst': self.study_reminder_time_pst,
+            'exam_event_duration_hours': self.exam_event_duration_hours
         }

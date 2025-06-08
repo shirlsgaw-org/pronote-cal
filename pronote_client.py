@@ -3,8 +3,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-import pronotepy
-from pronotepy import Client
+# Pronote API imports with error handling
+try:
+    import pronotepy
+    from pronotepy import Client
+except ImportError as e:
+    print(f"Pronote API import error: {e}")
+    raise ImportError("pronotepy library is required. Check requirements.txt and deployment package.")
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,75 @@ class PronoteClient:
             logger.error(f"Authentication error: {str(e)}")
             raise Exception(f"Failed to authenticate with Pronote: {str(e)}")
     
+    def get_exams(self, days_back: int = 60) -> List[Dict[str, Any]]:
+        """
+        Fetch exam/evaluation data for the specified number of days back.
+        
+        Args:
+            days_back: Number of days back to fetch exam data for
+            
+        Returns:
+            List of exam dictionaries with standardized format
+            
+        Raises:
+            Exception: If not authenticated or API call fails
+        """
+        if not self._authenticated:
+            if not self.authenticate():
+                raise Exception("Cannot fetch exams: authentication failed")
+        
+        try:
+            logger.info(f"Fetching exams for past {days_back} days")
+            
+            # Calculate date range
+            current_date = datetime.now().date()
+            cutoff_date = current_date - timedelta(days=days_back)
+            
+            # Fetch exams from Pronote
+            exams_list = []
+            
+            # Iterate through periods to get historical data
+            for period in self.client.periods:
+                # Skip periods that end before our cutoff date
+                if period.end < cutoff_date:
+                    continue
+                
+                try:
+                    # Get evaluations (exam scheduling/metadata)
+                    evaluations = period.evaluations
+                    for evaluation in evaluations:
+                        if evaluation.date >= cutoff_date:
+                            exam_item = self._standardize_evaluation(evaluation)
+                            if exam_item:
+                                exams_list.append(exam_item)
+                    
+                    # Get grades that represent exam results
+                    grades = period.grades
+                    for grade in grades:
+                        if grade.date >= cutoff_date and self._is_exam_grade(grade):
+                            exam_item = self._standardize_exam_grade(grade)
+                            if exam_item:
+                                exams_list.append(exam_item)
+                                
+                except Exception as e:
+                    logger.warning(f"Error processing period {period}: {str(e)}")
+                    continue
+            
+            # Remove duplicates based on content hash
+            unique_exams = {}
+            for exam in exams_list:
+                content_hash = exam.get('content_hash')
+                if content_hash and content_hash not in unique_exams:
+                    unique_exams[content_hash] = exam
+            
+            final_exams = list(unique_exams.values())
+            logger.info(f"Retrieved {len(final_exams)} unique exam records")
+            return final_exams
+            
+        except Exception as e:
+            logger.error(f"Error fetching exams: {str(e)}")
+            raise Exception(f"Failed to fetch exams: {str(e)}")
+
     def get_homework(self, days_ahead: int = 30) -> List[Dict[str, Any]]:
         """
         Fetch homework assignments for the specified number of days ahead.
@@ -224,6 +298,204 @@ class PronoteClient:
         logger.debug(f"Generated content hash {content_hash[:8]} for: {content[:50]}...")
         return content_hash
     
+    def _standardize_evaluation(self, evaluation) -> Optional[Dict[str, Any]]:
+        """
+        Convert Pronote evaluation object to standardized exam format.
+        
+        Args:
+            evaluation: Raw evaluation object from pronotepy
+            
+        Returns:
+            Standardized exam dictionary or None if invalid
+        """
+        try:
+            # Extract basic information
+            subject = getattr(evaluation, 'subject', {})
+            subject_name = getattr(subject, 'name', 'Unknown Subject')
+            
+            # Get evaluation details
+            name = getattr(evaluation, 'name', '').strip()
+            description = getattr(evaluation, 'description', '').strip()
+            
+            if not name:
+                name = 'Evaluation'
+            
+            # Get exam date
+            exam_date = getattr(evaluation, 'date', None)
+            if not exam_date:
+                logger.warning("Evaluation missing date, skipping")
+                return None
+            
+            # Convert to datetime if needed
+            if isinstance(exam_date, str):
+                try:
+                    exam_date = datetime.strptime(exam_date, '%Y-%m-%d').date()
+                except ValueError:
+                    logger.warning(f"Invalid exam date format: {exam_date}")
+                    return None
+            
+            # Get additional details
+            teacher = getattr(evaluation, 'teacher', 'Unknown Teacher')
+            coefficient = getattr(evaluation, 'coefficient', 1)
+            
+            # Generate content hash for idempotency
+            content_hash = self._generate_exam_content_hash(subject_name, exam_date, name, 'evaluation')
+            
+            # Build standardized exam item
+            exam_item = {
+                'id': f"eval_{subject_name}_{exam_date}_{content_hash[:8]}",
+                'subject': subject_name,
+                'description': name,
+                'detailed_description': description,
+                'exam_date': exam_date,
+                'teacher': teacher,
+                'coefficient': coefficient,
+                'assignment_type': 'exam',
+                'data_source': 'evaluation',
+                'content_hash': content_hash,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            logger.debug(f"Standardized evaluation: {exam_item['subject']} - {exam_item['description']} (hash: {content_hash[:8]})")
+            return exam_item
+            
+        except Exception as e:
+            logger.error(f"Error standardizing evaluation: {str(e)}")
+            return None
+
+    def _standardize_exam_grade(self, grade) -> Optional[Dict[str, Any]]:
+        """
+        Convert Pronote grade object (from exam) to standardized exam format.
+        
+        Args:
+            grade: Raw grade object from pronotepy
+            
+        Returns:
+            Standardized exam dictionary or None if invalid
+        """
+        try:
+            # Extract basic information
+            subject = getattr(grade, 'subject', {})
+            subject_name = getattr(subject, 'name', 'Unknown Subject')
+            
+            # Get grade details
+            grade_value = getattr(grade, 'grade', '')
+            out_of = getattr(grade, 'out_of', '')
+            comment = getattr(grade, 'comment', '').strip()
+            
+            # Get exam date
+            exam_date = getattr(grade, 'date', None)
+            if not exam_date:
+                logger.warning("Grade missing date, skipping")
+                return None
+            
+            # Convert to datetime if needed
+            if isinstance(exam_date, str):
+                try:
+                    exam_date = datetime.strptime(exam_date, '%Y-%m-%d').date()
+                except ValueError:
+                    logger.warning(f"Invalid exam date format: {exam_date}")
+                    return None
+            
+            # Generate description from grade info
+            description = comment if comment else f"Examen {subject_name}"
+            if grade_value and out_of:
+                description += f" ({grade_value}/{out_of})"
+            
+            # Get additional details
+            coefficient = getattr(grade, 'coefficient', '')
+            average = getattr(grade, 'average', '')
+            
+            # Generate content hash for idempotency
+            content_hash = self._generate_exam_content_hash(subject_name, exam_date, description, 'grade')
+            
+            # Build standardized exam item
+            exam_item = {
+                'id': f"grade_{subject_name}_{exam_date}_{content_hash[:8]}",
+                'subject': subject_name,
+                'description': description,
+                'detailed_description': comment,
+                'exam_date': exam_date,
+                'grade': grade_value,
+                'out_of': out_of,
+                'coefficient': coefficient,
+                'class_average': average,
+                'assignment_type': 'exam',
+                'data_source': 'grade',
+                'content_hash': content_hash,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            logger.debug(f"Standardized exam grade: {exam_item['subject']} - {exam_item['description']} (hash: {content_hash[:8]})")
+            return exam_item
+            
+        except Exception as e:
+            logger.error(f"Error standardizing exam grade: {str(e)}")
+            return None
+
+    def _generate_exam_content_hash(self, subject: str, exam_date, description: str, source_type: str) -> str:
+        """
+        Generate a SHA256 hash for exam content to ensure idempotency.
+        
+        Args:
+            subject: Subject name
+            exam_date: Exam date (date object)
+            description: Exam description
+            source_type: Source type ('evaluation' or 'grade')
+            
+        Returns:
+            SHA256 hash string
+        """
+        # Normalize inputs for consistent hashing
+        normalized_subject = subject.strip().lower()
+        normalized_description = description.strip().lower()
+        exam_date_str = exam_date.strftime('%Y-%m-%d') if hasattr(exam_date, 'strftime') else str(exam_date)
+        
+        # Create content string for hashing
+        content = f"exam|{normalized_subject}|{exam_date_str}|{normalized_description}|{source_type}"
+        
+        # Generate SHA256 hash
+        hash_object = hashlib.sha256(content.encode('utf-8'))
+        content_hash = hash_object.hexdigest()
+        
+        logger.debug(f"Generated exam content hash {content_hash[:8]} for: {content[:50]}...")
+        return content_hash
+
+    def _is_exam_grade(self, grade) -> bool:
+        """
+        Determine if a grade is from an exam/test vs regular homework.
+        
+        Args:
+            grade: Raw grade object from pronotepy
+            
+        Returns:
+            True if grade is from an exam, False otherwise
+        """
+        # Keywords that indicate exams/tests
+        exam_keywords = [
+            'contrôle', 'devoir surveillé', 'ds', 'évaluation', 'test', 'examen',
+            'interro', 'interrogation', 'bac', 'partiel', 'quiz', 'composition'
+        ]
+        
+        # Check comment field for exam indicators
+        comment = getattr(grade, 'comment', '').lower()
+        
+        # Check if any exam keywords are in the comment
+        for keyword in exam_keywords:
+            if keyword in comment:
+                return True
+        
+        # Check coefficient - exams typically have higher coefficients
+        try:
+            coefficient = float(getattr(grade, 'coefficient', '0'))
+            if coefficient >= 2.0:  # Assume exams have coefficient >= 2
+                return True
+        except (ValueError, TypeError):
+            pass
+        
+        # Default to False for homework
+        return False
+
     def _determine_assignment_type(self, hw, description: str) -> str:
         """
         Determine the type of assignment (homework, test, exam).

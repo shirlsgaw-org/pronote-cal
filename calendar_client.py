@@ -2,13 +2,24 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
+import pytz
 
-import boto3
-from botocore.exceptions import ClientError
-from google.oauth2.credentials import Credentials
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+# AWS imports with error handling
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError as e:
+    print(f"AWS SDK import error: {e}")
+    raise ImportError("boto3 is required for AWS operations")
+
+# Google API imports with graceful error handling
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+except ImportError as e:
+    print(f"Google API client import error: {e}")
+    raise ImportError("Google API client libraries are required. Check requirements.txt and deployment package.")
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +48,10 @@ class CalendarClient:
         
         # Initialize AWS Secrets Manager client
         self.secrets_client = boto3.client('secretsmanager', region_name=aws_region)
+        
+        # Set up timezones
+        self.paris_tz = pytz.timezone('Europe/Paris')
+        self.pst_tz = pytz.timezone('US/Pacific')
     
     def authenticate(self) -> bool:
         """
@@ -183,6 +198,226 @@ class CalendarClient:
         except Exception as e:
             logger.error(f"Error creating event: {str(e)}")
             return None
+    
+    def create_exam_event(self, title: str, description: str, exam_date: datetime.date, 
+                         subject: str, duration_hours: int = 2, content_hash: str = None,
+                         teacher: str = None, coefficient: str = None) -> Optional[str]:
+        """
+        Create an exam event in Google Calendar with distinctive styling.
+        
+        Args:
+            title: Event title
+            description: Event description
+            exam_date: Date of the exam
+            subject: Subject name
+            duration_hours: Event duration in hours
+            content_hash: SHA256 hash for idempotency
+            teacher: Teacher name
+            coefficient: Exam coefficient
+            
+        Returns:
+            Event ID if successful, None otherwise
+        """
+        if not self._authenticated:
+            if not self.authenticate():
+                raise Exception("Cannot create exam event: authentication failed")
+        
+        try:
+            # Set exam events for 10:00 AM on the exam date (Europe/Paris time)
+            event_start = datetime.combine(exam_date, datetime.min.time().replace(hour=10))
+            event_end = event_start + timedelta(hours=duration_hours)
+            
+            # Build detailed description
+            exam_description = f"🎓 EXAMEN - {description}\n\nSubject: {subject}\nExam Date: {exam_date}"
+            if teacher:
+                exam_description += f"\nTeacher: {teacher}"
+            if coefficient:
+                exam_description += f"\nCoefficient: {coefficient}"
+            
+            # Create event object with exam-specific styling
+            event = {
+                'summary': f"🎓 {title}",
+                'description': exam_description,
+                'start': {
+                    'dateTime': event_start.isoformat(),
+                    'timeZone': 'Europe/Paris',
+                },
+                'end': {
+                    'dateTime': event_end.isoformat(),
+                    'timeZone': 'Europe/Paris',
+                },
+                'colorId': self._get_exam_color_for_subject(subject),
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'popup', 'minutes': 60},    # 1 hour before
+                        {'method': 'popup', 'minutes': 1440},  # 1 day before
+                        {'method': 'popup', 'minutes': 10080}, # 1 week before
+                    ],
+                },
+                'extendedProperties': {
+                    'private': {
+                        'source': 'pronote',
+                        'pronote_hash': content_hash or '',
+                        'assignment_type': 'exam',
+                        'subject': subject,
+                        'exam_date': exam_date.isoformat(),
+                        'teacher': teacher or '',
+                        'coefficient': str(coefficient) if coefficient else '',
+                        'created_by': 'lambda',
+                        'sync_version': '2.0'
+                    }
+                }
+            }
+            
+            # Create the event
+            created_event = self.service.events().insert(
+                calendarId=self.calendar_id,
+                body=event
+            ).execute()
+            
+            event_id = created_event.get('id')
+            logger.info(f"Created exam event: {title} (ID: {event_id})")
+            return event_id
+            
+        except Exception as e:
+            logger.error(f"Error creating exam event: {str(e)}")
+            return None
+
+    def create_study_reminder_events(self, exam_title: str, exam_date: datetime.date, 
+                                   subject: str, content_hash_base: str) -> List[str]:
+        """
+        Create daily study reminder events for the week before an exam at 4:00 PM PST.
+        
+        Args:
+            exam_title: Title of the exam
+            exam_date: Date of the exam
+            subject: Subject name
+            content_hash_base: Base hash for generating unique hashes for each reminder
+            
+        Returns:
+            List of created event IDs
+        """
+        if not self._authenticated:
+            if not self.authenticate():
+                raise Exception("Cannot create study reminders: authentication failed")
+        
+        created_events = []
+        
+        # Create reminders for 7 days before the exam
+        for days_before in range(1, 8):  # 1-7 days before
+            try:
+                reminder_date = exam_date - timedelta(days=days_before)
+                
+                # Skip if reminder date is in the past
+                if reminder_date < datetime.now().date():
+                    continue
+                
+                # Create PST time at 4:00 PM
+                pst_time = self.pst_tz.localize(
+                    datetime.combine(reminder_date, datetime.min.time().replace(hour=16))
+                )
+                
+                # Convert to UTC for Google Calendar
+                utc_start = pst_time.astimezone(pytz.UTC)
+                utc_end = utc_start + timedelta(minutes=15)  # 15-minute reminder
+                
+                # Generate title based on days remaining
+                if days_before == 1:
+                    reminder_title = f"🔔 Final review: {subject} exam tomorrow"
+                else:
+                    reminder_title = f"🔔 Study reminder: {subject} exam in {days_before} days"
+                
+                # Generate unique content hash for this reminder
+                reminder_hash = self._generate_reminder_hash(content_hash_base, days_before)
+                
+                # Build reminder description
+                reminder_description = f"📚 Study reminder for upcoming exam\n\nExam: {exam_title}\nSubject: {subject}\nExam Date: {exam_date}\nDays remaining: {days_before}"
+                
+                # Create reminder event
+                event = {
+                    'summary': reminder_title,
+                    'description': reminder_description,
+                    'start': {
+                        'dateTime': utc_start.isoformat(),
+                        'timeZone': 'UTC',
+                    },
+                    'end': {
+                        'dateTime': utc_end.isoformat(),
+                        'timeZone': 'UTC',
+                    },
+                    'colorId': self._get_reminder_color(),
+                    'reminders': {
+                        'useDefault': False,
+                        'overrides': [
+                            {'method': 'popup', 'minutes': 0},   # At event time
+                            {'method': 'popup', 'minutes': 15},  # 15 minutes before
+                        ],
+                    },
+                    'extendedProperties': {
+                        'private': {
+                            'source': 'pronote',
+                            'pronote_hash': reminder_hash,
+                            'assignment_type': 'study_reminder',
+                            'subject': subject,
+                            'exam_date': exam_date.isoformat(),
+                            'days_before': str(days_before),
+                            'parent_exam_hash': content_hash_base,
+                            'created_by': 'lambda',
+                            'sync_version': '2.0'
+                        }
+                    }
+                }
+                
+                # Create the reminder event
+                created_event = self.service.events().insert(
+                    calendarId=self.calendar_id,
+                    body=event
+                ).execute()
+                
+                event_id = created_event.get('id')
+                created_events.append(event_id)
+                logger.info(f"Created study reminder: {reminder_title} (ID: {event_id})")
+                
+            except Exception as e:
+                logger.error(f"Error creating study reminder for {days_before} days before {exam_title}: {str(e)}")
+                continue
+        
+        return created_events
+    
+    def _generate_reminder_hash(self, base_hash: str, days_before: int) -> str:
+        """
+        Generate a unique hash for a study reminder based on the exam hash and days before.
+        
+        Args:
+            base_hash: Base exam content hash
+            days_before: Number of days before exam
+            
+        Returns:
+            Unique hash for the reminder
+        """
+        import hashlib
+        content = f"reminder|{base_hash}|{days_before}"
+        hash_object = hashlib.sha256(content.encode('utf-8'))
+        return hash_object.hexdigest()
+    
+    def _convert_paris_to_pst(self, paris_dt: datetime) -> datetime:
+        """
+        Convert a datetime from Europe/Paris timezone to US/Pacific.
+        
+        Args:
+            paris_dt: Datetime in Europe/Paris timezone
+            
+        Returns:
+            Datetime in US/Pacific timezone
+        """
+        # Localize to Paris timezone if naive
+        if paris_dt.tzinfo is None:
+            paris_dt = self.paris_tz.localize(paris_dt)
+        
+        # Convert to PST
+        pst_dt = paris_dt.astimezone(self.pst_tz)
+        return pst_dt
     
     def event_exists_by_hash(self, content_hash: str) -> Optional[Dict[str, Any]]:
         """
@@ -390,6 +625,48 @@ class CalendarClient:
                 return color
         
         return '1'  # Default blue
+    
+    def _get_exam_color_for_subject(self, subject: str) -> str:
+        """
+        Get a distinctive color ID for exam events based on subject.
+        Uses brighter/more prominent colors than homework.
+        
+        Args:
+            subject: Subject name
+            
+        Returns:
+            Google Calendar color ID for exams
+        """
+        # Exam color mapping (using more prominent colors)
+        exam_color_map = {
+            'mathématiques': '11',  # Red (prominent)
+            'français': '3',        # Purple (prominent)
+            'anglais': '5',         # Yellow (prominent)
+            'histoire': '8',        # Gray (prominent)
+            'géographie': '8',      # Gray (prominent)
+            'sciences': '10',       # Green (bright)
+            'physique': '10',       # Green (bright)
+            'chimie': '10',         # Green (bright)
+            'eps': '6',             # Orange (bright)
+            'arts': '6',            # Orange (bright)
+            'technologie': '9',     # Blue (bright)
+        }
+        
+        subject_lower = subject.lower()
+        for key, color in exam_color_map.items():
+            if key in subject_lower:
+                return color
+        
+        return '11'  # Default to red for exams (prominent)
+    
+    def _get_reminder_color(self) -> str:
+        """
+        Get color ID for study reminder events.
+        
+        Returns:
+            Google Calendar color ID for study reminders
+        """
+        return '7'  # Cyan/Light Blue for study reminders
     
     def get_upcoming_events(self, days_ahead: int = 7) -> List[Dict[str, Any]]:
         """
